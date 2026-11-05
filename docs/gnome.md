@@ -6,9 +6,11 @@ VOXL supports GNOME sessions on Xorg and Wayland. `--backend=auto` follows
 `XDG_SESSION_TYPE`; `--backend=x11` and `--backend=wayland` select explicitly. Both
 paths must run as the logged-in user in the graphical session.
 
-The Linux build and library tests pass on Ubuntu 26.10. A live GNOME Wayland session
-opened VOXL's RemoteDesktop screen-sharing consent dialog. Frame capture after consent
-and input delivery have not yet been validated.
+The Linux build and library tests pass on Ubuntu 26.10. In a live GNOME Wayland session,
+the user approved VOXL's portal request and the backend opened the selected 2048x1152
+monitor through PipeWire; the H.264 capture pipeline started at 60 fps. The local-only,
+read-only server returned its web client successfully. Browser-rendered video frames and
+interactive input have not been validated in this run.
 
 | Capability | GNOME on Xorg | GNOME on Wayland |
 | --- | --- | --- |
