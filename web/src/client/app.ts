@@ -17,6 +17,8 @@ export interface App {
 	remoteMac: boolean;
 	/** The server only shows the desktop (--read-only), from the server's hello. */
 	readOnly: boolean;
+	/** Whether the active desktop backend supports clipboard synchronization. */
+	clipboardEnabled: boolean;
 	inIframe: boolean;
 	/** Desktop size in pixels; 0 until the server says hello. */
 	desk: { w: number; h: number };

@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 #[derive(Clone)]
 pub struct VideoConfig {
     pub display: Option<String>,
+    #[cfg(target_os = "linux")]
+    pub wayland: Option<std::sync::Arc<crate::wayland::SessionHandle>>,
     pub fps: u32,
     pub preset: String,
     pub threads: u32,
@@ -116,6 +118,9 @@ pub fn spawn(
 }
 
 fn build(cfg: &VideoConfig, hub: &Arc<Hub>) -> Result<Pipeline, String> {
+    #[cfg(target_os = "linux")]
+    let cap = Capturer::new(cfg.display.as_deref(), cfg.wayland.clone())?;
+    #[cfg(not(target_os = "linux"))]
     let cap = Capturer::new(cfg.display.as_deref())?;
     let (w, h) = (cap.width, cap.height);
     hub.width.store(w, Ordering::Relaxed);
@@ -535,7 +540,12 @@ fn capture_loop(
             // Our shm copy may be stale: re-grab everything once.
             cap.grab(cap.full())?;
             pending = [Some(cap.full()), Some(cap.full())];
-            cap.damaged = true;
+            #[cfg(target_os = "linux")]
+            cap.mark_full();
+            #[cfg(not(target_os = "linux"))]
+            {
+                cap.damaged = true;
+            }
             full_next = true;
         }
         let paintover_due = paintover_left > 0

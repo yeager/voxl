@@ -85,7 +85,8 @@ frame being decoded. voxl's column is its best run of each test. To reproduce, s
 ## Usage
 
 Build (needs Rust, pkg-config, clang, x264, libyuv, libopus, libpulse and esbuild;
-`nix-shell` provides them all):
+Linux builds also need GStreamer 1.20 development libraries and its PipeWire plugin
+for Wayland capture. `nix-shell` provides these dependencies):
 
 ```sh
 nix-shell
@@ -107,6 +108,35 @@ DISPLAY=:1 ./target/release/voxl --port=6901
 # prints: open http://localhost:6901/?token=4f1c… to sign in
 ```
 
+### GNOME
+
+On GNOME under Xorg, voxl uses the existing X11 backend. It must run in the logged-in
+user's session with access to that session's `DISPLAY` and X authorization data.
+Capture, input, clipboard, and dynamic resolution use X11 extensions.
+
+On GNOME under Wayland, voxl uses the XDG Desktop Portal and PipeWire. The portal asks
+the logged-in user to approve screen sharing and, unless `--read-only` is set, keyboard
+and pointer control. Select one monitor in the portal dialog. The stream is captured
+through GStreamer's PipeWire source; system audio continues through the
+PulseAudio-compatible monitor source. Wayland clipboard synchronization and dynamic
+resolution are currently disabled. VOXL does not use Xwayland as a substitute for
+full-desktop capture.
+
+Select the backend explicitly or let VOXL follow the session type:
+
+```sh
+voxl --backend=wayland
+voxl --backend=x11
+voxl --backend=auto # default; reads XDG_SESSION_TYPE
+```
+
+Wayland requires `xdg-desktop-portal`, the GNOME portal backend, PipeWire, and the
+GStreamer PipeWire source plugin. On Ubuntu, install it with
+`sudo apt install gstreamer1.0-pipewire`; package names vary on other distributions.
+
+See [GNOME support status and backend notes](docs/gnome.md) for the component-by-
+component breakdown.
+
 Start Xvfb with `-shmem` for zero-copy capture, and use the patched Xvfb
 (`nix-build -E 'with import <nixpkgs> {}; callPackage ./xvfb.nix {}'`) for smooth
 scrolling. voxl accepts selkies' command-line flags; other selkies flags are ignored.
@@ -114,6 +144,7 @@ scrolling. voxl accepts selkies' command-line flags; other selkies flags are ign
 
 | Flag                                                           | Default                            |                                                                                                                   |
 | -------------------------------------------------------------- | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `--backend`                                                     | `auto`                             | Linux desktop backend: `auto`, `x11` or `wayland`                                                                 |
 | `--addr`, `--port`                                             | `0.0.0.0`, `6901`                  | listen address                                                                                                    |
 | `--title`                                                      | `Voxl Computer Stream`             | the page's title: the browser tab, and the app's name if a viewer installs it                                     |
 | `--favicon`                                                    | voxl's icon                        | the tab's icon: an `.ico`, `.png`, `.gif`, `.webp` or `.svg` file                                                 |
@@ -322,10 +353,12 @@ localhost:
 
 Phones and tablets get touch input and an on-screen keyboard.
 
-**Wayland?** Not yet; on Linux voxl streams X11 displays, Xvfb included. The virtual
-desktops voxl is built for run on Xvfb (E2B's and Daytona's do too), and X11 lets voxl
-capture them without a permission prompt, with damage events that keep a still screen at
-no CPU and power `/wait`. Wayland support is being worked on.
+**Wayland?** Initial support is implemented for Linux, with end-to-end runtime validation
+still pending. GNOME Wayland capture and input use the desktop portal and PipeWire, so the
+logged-in user must approve the screen and input request. The current Wayland backend
+shares one selected monitor and does not yet support clipboard sync or dynamic resolution.
+GNOME on Xorg and headless Xvfb continue to use the original X11 backend, including damage
+events and the low-CPU `/wait` API.
 
 **Does it use the GPU?** Not yet. voxl encodes H.264 on the CPU with x264: 1.3–1.7 cores
 for a busy 2560x1600 desktop, X server included (see the CPU table above). Hardware

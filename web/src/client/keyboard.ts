@@ -162,6 +162,10 @@ export function setupKeyboard(
 
 	kbd.addEventListener('paste', (e) => {
 		e.preventDefault();
+		if (!app.clipboardEnabled) {
+			flushPaste();
+			return;
+		}
 		const dt = e.clipboardData;
 		const text = dt?.getData('text/plain');
 		if (text) {

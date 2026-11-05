@@ -1,6 +1,10 @@
 //! X11 screen capture: MIT-SHM GetImage into a persistent BGRX frame, driven by XDamage.
 
+use nix::unistd::pipe2;
 use std::os::fd::{AsFd, BorrowedFd};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::protocol::damage::{self, ConnectionExt as _};
 use x11rb::protocol::shm::{self, ConnectionExt as _};
@@ -79,7 +83,7 @@ pub struct Band {
     pub y1: u32,
 }
 
-pub struct Capturer {
+pub struct X11Capturer {
     pub conn: RustConnection,
     root: u32,
     pub width: u32,
@@ -106,7 +110,7 @@ pub struct Capturer {
     pub changes: Vec<(u32, u32, u32, u32)>,
 }
 
-impl Capturer {
+impl X11Capturer {
     pub fn new(display: Option<&str>) -> Result<Self, String> {
         let (conn, screen_num) =
             RustConnection::connect(display).map_err(|e| format!("X connect: {e}"))?;
@@ -177,7 +181,7 @@ impl Capturer {
         conn.damage_create(damage, root, damage::ReportLevel::RAW_RECTANGLES)
             .map_err(|e| e.to_string())?;
         conn.flush().map_err(|e| e.to_string())?;
-        Ok(Capturer {
+        Ok(X11Capturer {
             conn,
             root,
             width,
@@ -365,6 +369,260 @@ impl Capturer {
             .reply()
             .map_err(|e| e.to_string())?;
         Ok(())
+    }
+}
+
+/// Linux capture backend: X11 for Xorg sessions or portal/PipeWire for Wayland.
+pub struct Capturer {
+    backend: Backend,
+    pub width: u32,
+    pub height: u32,
+    pub damaged: bool,
+    pub damaged_at: Option<Instant>,
+    pub mb_cols: usize,
+    pub changes: Vec<(u32, u32, u32, u32)>,
+}
+
+enum Backend {
+    X11(X11Capturer),
+    Wayland(WaylandCapturer),
+}
+
+struct WaylandCapturer {
+    session: Arc<crate::wayland::SessionHandle>,
+    wake_r: std::os::fd::OwnedFd,
+    latest: Arc<parking_lot::Mutex<Option<crate::wayland::Frame>>>,
+    stop: Arc<AtomicBool>,
+    failed: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    pixels: Vec<u8>,
+    stride: usize,
+    dirty: Vec<u8>,
+    resize_pending: bool,
+}
+
+impl Capturer {
+    pub fn new(
+        display: Option<&str>,
+        wayland: Option<Arc<crate::wayland::SessionHandle>>,
+    ) -> Result<Self, String> {
+        if let Some(session) = wayland {
+            let capture = crate::wayland::Capture::new(&session)?;
+            // Portal stream properties describe compositor coordinates, which can
+            // differ from PipeWire pixel dimensions on scaled HiDPI monitors. Prime
+            // the first frame before constructing the encoder so its geometry is
+            // based on the actual pixel format negotiated by PipeWire.
+            let first_frame = (0..50)
+                .find_map(|_| match capture.pull(Duration::from_millis(200)) {
+                    Ok(Some(frame)) => Some(Ok(frame)),
+                    Ok(None) => None,
+                    Err(e) => Some(Err(e)),
+                })
+                .transpose()?
+                .ok_or("timed out waiting for the first PipeWire frame")?;
+            let (width, height) = (first_frame.width, first_frame.height);
+            session.set_capture_dimensions(width, height);
+            let (wake_r, wake_w) =
+                pipe2(nix::fcntl::OFlag::O_NONBLOCK | nix::fcntl::OFlag::O_CLOEXEC)
+                    .map_err(|e| format!("create PipeWire frame wakeup: {e}"))?;
+            let latest = Arc::new(parking_lot::Mutex::new(Some(first_frame)));
+            let worker_latest = latest.clone();
+            let stop = Arc::new(AtomicBool::new(false));
+            let worker_stop = stop.clone();
+            let failed = Arc::new(AtomicBool::new(false));
+            let worker_failed = failed.clone();
+            let thread = std::thread::Builder::new()
+                .name("pipewire-frames".into())
+                .spawn(move || {
+                    while !worker_stop.load(Ordering::Relaxed) {
+                        match capture.pull(Duration::from_millis(100)) {
+                            Ok(Some(frame)) => {
+                                *worker_latest.lock() = Some(frame);
+                                let _ = nix::unistd::write(&wake_w, &[1]);
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                log::error!("PipeWire capture stopped: {e}");
+                                worker_failed.store(true, Ordering::Relaxed);
+                                let _ = nix::unistd::write(&wake_w, &[1]);
+                                break;
+                            }
+                        }
+                    }
+                })
+                .map_err(|e| format!("start PipeWire frame worker: {e}"))?;
+            Ok(Self {
+                backend: Backend::Wayland(WaylandCapturer {
+                    session,
+                    wake_r,
+                    latest,
+                    stop,
+                    failed,
+                    thread: Some(thread),
+                    pixels: vec![0; width as usize * height as usize * 4],
+                    stride: width as usize * 4,
+                    dirty: vec![1; (width as usize).div_ceil(16) * (height as usize).div_ceil(16)],
+                    resize_pending: false,
+                }),
+                width,
+                height,
+                damaged: true,
+                damaged_at: None,
+                mb_cols: (width as usize).div_ceil(16),
+                changes: vec![(0, 0, width, height)],
+            })
+        } else {
+            let x11 = X11Capturer::new(display)?;
+            let (width, height) = (x11.width, x11.height);
+            Ok(Self {
+                backend: Backend::X11(x11),
+                width,
+                height,
+                damaged: true,
+                damaged_at: None,
+                mb_cols: (width as usize).div_ceil(16),
+                changes: Vec::new(),
+            })
+        }
+    }
+
+    pub fn fd(&self) -> BorrowedFd<'_> {
+        match &self.backend {
+            Backend::X11(x11) => x11.fd(),
+            Backend::Wayland(wl) => wl.wake_r.as_fd(),
+        }
+    }
+
+    pub fn pump(&mut self) -> Result<(), String> {
+        match &mut self.backend {
+            Backend::X11(x11) => {
+                x11.pump()?;
+                self.width = x11.width;
+                self.height = x11.height;
+                self.damaged = x11.damaged;
+                self.damaged_at = x11.damaged_at;
+                self.mb_cols = x11.mb_cols;
+                self.changes.append(&mut x11.changes);
+            }
+            Backend::Wayland(wl) => {
+                if wl.failed.load(Ordering::Relaxed) {
+                    return Err("portal/PipeWire capture stream ended".into());
+                }
+                let mut drain = [0u8; 64];
+                while matches!(nix::unistd::read(&wl.wake_r, &mut drain), Ok(n) if n > 0) {}
+                if let Some(frame) = wl.latest.lock().take() {
+                    if frame.width != self.width || frame.height != self.height {
+                        self.width = frame.width;
+                        self.height = frame.height;
+                        self.mb_cols = (self.width as usize).div_ceil(16);
+                        wl.dirty = vec![1; self.mb_cols * (self.height as usize).div_ceil(16)];
+                        wl.resize_pending = true;
+                    }
+                    wl.stride = frame.stride;
+                    wl.pixels = frame.data;
+                    wl.dirty.fill(1);
+                    self.damaged = true;
+                    self.damaged_at.get_or_insert_with(Instant::now);
+                    self.changes.push((0, 0, self.width, self.height));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn take_damage(&mut self) -> Result<Option<Band>, String> {
+        let result = match &mut self.backend {
+            Backend::X11(x11) => x11.take_damage()?,
+            Backend::Wayland(_) => self.damaged.then(|| self.full()),
+        };
+        self.damaged = false;
+        self.damaged_at = None;
+        Ok(result)
+    }
+
+    pub fn take_mb_map(&mut self) -> Vec<u8> {
+        match &mut self.backend {
+            Backend::X11(x11) => x11.take_mb_map(),
+            Backend::Wayland(wl) => std::mem::replace(
+                &mut wl.dirty,
+                vec![0; self.mb_cols * (self.height as usize).div_ceil(16)],
+            ),
+        }
+    }
+
+    pub fn full(&self) -> Band {
+        Band {
+            y0: 0,
+            y1: self.height,
+        }
+    }
+
+    pub fn convert(&self, dst: &mut crate::convert::I420, y0: usize, y1: usize, threads: usize) {
+        match &self.backend {
+            Backend::X11(x11) => x11.convert(dst, y0, y1, threads),
+            Backend::Wayland(wl) => {
+                crate::convert::convert_band(&wl.pixels, wl.stride, dst, y0, y1, threads)
+            }
+        }
+    }
+
+    pub fn snapshot(&mut self) -> Result<Vec<u8>, String> {
+        match &mut self.backend {
+            Backend::X11(x11) => x11.snapshot(),
+            Backend::Wayland(wl) => Ok(wl.pixels.clone()),
+        }
+    }
+
+    pub fn bgrx(&self) -> Option<(&[u8], usize)> {
+        match &self.backend {
+            Backend::X11(x11) => x11.bgrx(),
+            Backend::Wayland(wl) => Some((&wl.pixels, wl.stride)),
+        }
+    }
+
+    pub fn needs_rebuild(&self) -> bool {
+        match &self.backend {
+            Backend::X11(x11) => x11.needs_rebuild(),
+            Backend::Wayland(wl) => wl.resize_pending,
+        }
+    }
+
+    pub fn geometry_changed(&self) -> bool {
+        match &self.backend {
+            Backend::X11(x11) => x11.geometry_changed(),
+            Backend::Wayland(wl) => wl.resize_pending,
+        }
+    }
+
+    pub fn grab(&self, band: Band) -> Result<(), String> {
+        match &self.backend {
+            Backend::X11(x11) => x11.grab(band),
+            Backend::Wayland(_) => Ok(()),
+        }
+    }
+
+    pub fn mark_full(&mut self) {
+        self.damaged = true;
+        self.damaged_at.get_or_insert_with(Instant::now);
+        match &mut self.backend {
+            Backend::X11(x11) => {
+                x11.damaged = true;
+                x11.damaged_at.get_or_insert_with(Instant::now);
+                x11.acc = Some((0, x11.height));
+                x11.mb_dirty.fill(1);
+            }
+            Backend::Wayland(wl) => wl.dirty.fill(1),
+        }
+    }
+}
+
+impl Drop for WaylandCapturer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        let _keep_portal_session_alive = &self.session;
     }
 }
 

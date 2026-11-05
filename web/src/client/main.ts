@@ -75,6 +75,7 @@ function main() {
 		isMac: /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent),
 		remoteMac: false,
 		readOnly: false,
+		clipboardEnabled: true,
 		inIframe: window !== window.top,
 		desk: { w: 0, h: 0 },
 		view: { scale: 1 },
@@ -136,6 +137,7 @@ function main() {
 				app.desk.h = m.h;
 				app.remoteMac = m.os === 'macos';
 				app.readOnly = !!m.readOnly;
+				app.clipboardEnabled = m.clipboard !== false;
 				app.tools.classList.toggle('read-only', app.readOnly);
 				video.build(m.stripes && m.stripes.length ? m.stripes : [[0, m.h]]);
 				video.layout();

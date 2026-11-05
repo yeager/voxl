@@ -39,6 +39,8 @@ export interface Hello {
 	os?: string;
 	audio: boolean;
 	mic?: boolean;
+	/** Whether desktop clipboard synchronization is available in the active backend. */
+	clipboard?: boolean;
 	stripes?: Stripe[];
 	files?: FilesConfig;
 	/** The server only shows the desktop: the viewer cannot send input. */

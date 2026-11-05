@@ -1,5 +1,5 @@
 //! voxl: low-latency desktop streaming (H.264 over WebSocket) for the browser, from an
-//! X11 display on Linux or the screen of a Mac or a Windows machine.
+//! X11 or Wayland desktop on Linux or the screen of a Mac or a Windows machine.
 //!
 //! The `voxl` binary calls [`run`] with its command line; other programs (the Tembo CLI's
 //! `tembo voxl`) embed the server the same way.
@@ -31,6 +31,8 @@ mod screen;
 mod server;
 mod video;
 mod wait;
+#[cfg(target_os = "linux")]
+mod wayland;
 #[cfg(windows)]
 mod win;
 
@@ -122,6 +124,31 @@ async fn serve(a: HashMap<String, String>) {
         .or_else(|| a.get("display").cloned());
     #[cfg(not(target_os = "linux"))]
     let display = a.get("display").cloned();
+    #[cfg(target_os = "linux")]
+    let wayland_session = {
+        let use_wayland = match a.get("backend").map(String::as_str).unwrap_or("auto") {
+            "auto" => std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland"),
+            "wayland" => true,
+            "x11" => false,
+            other => {
+                log::error!("unsupported --backend={other}; choose auto, x11, or wayland");
+                return;
+            }
+        };
+        if use_wayland {
+            match wayland::SessionHandle::start(truthy(a.get("read-only"), false)).await {
+                Ok(session) => Some(session),
+                Err(e) => {
+                    log::error!("Wayland portal startup failed: {e}");
+                    return;
+                }
+            }
+        } else {
+            None
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let wayland_session: Option<()> = None;
     #[cfg(target_os = "macos")]
     mac::init(&a);
     #[cfg(windows)]
@@ -143,6 +170,8 @@ async fn serve(a: HashMap<String, String>) {
         .unwrap_or(4) as u32;
     let vcfg = video::VideoConfig {
         display: display.clone(),
+        #[cfg(target_os = "linux")]
+        wayland: wayland_session.clone(),
         fps: range_max(a.get("framerate"), 60.0) as u32,
         preset: a
             .get("preset")
@@ -177,9 +206,14 @@ async fn serve(a: HashMap<String, String>) {
         .map(|s| s.as_str())
         .unwrap_or("true");
     let clip_mode = desktop::ClipboardMode {
-        to_server: matches!(clip, "true" | "in"),
-        to_client: matches!(clip, "true" | "out"),
+        to_server: wayland_session.is_none() && matches!(clip, "true" | "in"),
+        to_client: wayland_session.is_none() && matches!(clip, "true" | "out"),
     };
+    if wayland_session.is_some() && clip != "false" {
+        log::warn!(
+            "Wayland clipboard synchronization is not implemented; clipboard sharing is disabled"
+        );
+    }
     let audio_on = truthy(a.get("audio-enabled"), true);
 
     let hub = hub::Hub::new();
@@ -189,7 +223,10 @@ async fn serve(a: HashMap<String, String>) {
     let read_only = truthy(a.get("read-only"), false);
     // --enable-resize (as in selkies): clients resize the desktop to their window. Not
     // for read-only viewers: a new size changes the desktop for everyone.
-    let enable_resize = truthy(a.get("enable-resize"), false);
+    let enable_resize = truthy(a.get("enable-resize"), false) && wayland_session.is_none();
+    if wayland_session.is_some() && truthy(a.get("enable-resize"), false) {
+        log::warn!("dynamic resolution is unavailable for the selected Wayland portal stream");
+    }
     if enable_resize && read_only {
         log::warn!("--enable-resize is ignored with --read-only: viewers can't resize the desktop");
     }
@@ -234,7 +271,7 @@ async fn serve(a: HashMap<String, String>) {
                 .collect()
         })
         .unwrap_or_default();
-    if radius > 0 || !named.is_empty() {
+    if (radius > 0 || !named.is_empty()) && wayland_session.is_none() {
         #[cfg(target_os = "linux")]
         if let Err(e) = corners::spawn(display.clone(), radius, named) {
             log::warn!("rounded corners unavailable: {e}");
@@ -242,16 +279,35 @@ async fn serve(a: HashMap<String, String>) {
         #[cfg(not(target_os = "linux"))]
         log::info!("--round-corners/--round-windows only apply to X11 desktops");
     }
-    let clipboard = match desktop::spawn(display.clone(), hub.clone(), clip_mode) {
-        Ok(h) => Some(h),
-        Err(e) => {
-            log::error!("cursor/clipboard init failed: {e}");
-            None
+    let clipboard = if wayland_session.is_some() {
+        None
+    } else {
+        match desktop::spawn(display.clone(), hub.clone(), clip_mode) {
+            Ok(h) => Some(h),
+            Err(e) => {
+                log::error!("cursor/clipboard init failed: {e}");
+                None
+            }
         }
     };
     let px_per_notch = range_max(a.get("scroll-px-per-notch"), 180.0);
-    match input::spawn(display.clone(), clipboard, px_per_notch) {
-        Ok(tx) => *hub.input.lock() = Some(tx),
+    #[cfg(target_os = "linux")]
+    let input_result = if read_only {
+        Ok(None)
+    } else if let Some(session) = &wayland_session {
+        Ok(Some(wayland::spawn_input(session.clone(), px_per_notch)))
+    } else {
+        input::spawn(display.clone(), clipboard, px_per_notch).map(Some)
+    };
+    #[cfg(not(target_os = "linux"))]
+    let input_result = if read_only {
+        Ok(None)
+    } else {
+        input::spawn(display.clone(), clipboard, px_per_notch).map(Some)
+    };
+    match input_result {
+        Ok(Some(tx)) => *hub.input.lock() = Some(tx),
+        Ok(None) => {}
         Err(e) => log::error!("input init failed: {e}"),
     }
     if audio_on {
@@ -316,6 +372,7 @@ async fn serve(a: HashMap<String, String>) {
         extra.insert("os".into(), std::env::consts::OS.into());
         extra.insert("audio".into(), audio_on.into());
         extra.insert("mic".into(), mic.is_some().into());
+        extra.insert("clipboard".into(), wayland_session.is_none().into());
         if read_only {
             extra.insert("readOnly".into(), true.into());
         }

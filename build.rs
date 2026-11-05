@@ -36,11 +36,14 @@ fn main() {
 fn unix_libs(target: &str) -> Vec<std::path::PathBuf> {
     let x264 = pkg_config::probe_library("x264").expect("x264");
     // macOS captures NV12 (no libyuv) and gets audio from ScreenCaptureKit (no PulseAudio).
-    let libs: &[&str] = if target == "macos" {
-        &["opus"]
+    let mut libs = if target == "macos" {
+        vec!["opus"]
     } else {
-        &["libyuv", "opus", "libpulse-simple"]
+        vec!["libyuv", "opus", "libpulse-simple"]
     };
+    if target == "linux" {
+        libs.extend(["gstreamer-1.0", "gstreamer-app-1.0", "gstreamer-video-1.0"]);
+    }
     let others: Vec<_> = libs
         .iter()
         .filter_map(|&l| match pkg_config::probe_library(l) {

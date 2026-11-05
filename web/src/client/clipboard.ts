@@ -9,6 +9,7 @@ export function createClipboard(app: App) {
 	function flush() {
 		if (
 			pending === null ||
+			!app.clipboardEnabled ||
 			!navigator.clipboard ||
 			(app.inIframe && !document.hasFocus())
 		)
@@ -33,6 +34,7 @@ export function createClipboard(app: App) {
 	return {
 		flush,
 		onRemoteText(text: string) {
+			if (!app.clipboardEnabled) return;
 			if (text === last) return;
 			last = text;
 			pending = text;
@@ -40,6 +42,7 @@ export function createClipboard(app: App) {
 		},
 		/** Clipboard image message: type byte, then PNG. */
 		onRemoteImage(buf: ArrayBuffer) {
+			if (!app.clipboardEnabled) return;
 			pending = new Blob([new Uint8Array(buf, 1)], { type: 'image/png' });
 			flush();
 		},

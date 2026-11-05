@@ -43,7 +43,9 @@ Video:
 
 #[cfg(not(any(target_os = "macos", windows)))]
 const DESKTOP: &str = "
-Desktop (the X11 display in $DISPLAY):
+Desktop (Linux X11 or Wayland):
+  --backend                     auto, x11 or wayland (default auto; follows
+                                XDG_SESSION_TYPE)
   --enable-clipboard            true, in, out or false (default true)
   --audio-enabled               desktop audio (default true)
   --audio-device-name           PulseAudio source (default output.monitor)

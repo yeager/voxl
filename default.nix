@@ -7,6 +7,8 @@
   libopus,
   libpulseaudio,
   xorg,
+  gst_all_1,
+  pipewire,
   esbuild,
   typescript,
 }:
@@ -47,10 +49,14 @@ rustPlatform.buildRustPackage {
     libopus
     libpulseaudio
     xorg.libxcb
+    gst_all_1.gstreamer
+    gst_all_1.gst-plugins-base
+    gst_all_1.gst-plugins-good
+    pipewire
   ];
 
   meta = {
-    description = "Low-latency X11 desktop streaming server (H.264 over WebSocket) for the Computer preview";
+    description = "Low-latency Linux X11/Wayland desktop streaming server (H.264 over WebSocket)";
     license = lib.licenses.mit;
     mainProgram = "voxl";
     platforms = ["x86_64-linux"];

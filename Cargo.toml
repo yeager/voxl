@@ -4,7 +4,7 @@ name = "voxl-server"
 version = "0.3.3"
 edition = "2021"
 license = "MIT"
-description = "Low-latency desktop streaming for the browser: an X11 display, a Mac's screen or a Windows desktop as H.264 over a WebSocket"
+description = "Low-latency desktop streaming for the browser: Linux X11/Wayland, macOS or Windows as H.264 over a WebSocket"
 repository = "https://github.com/tembo/voxl"
 readme = "README.md"
 # Lets programs that embed voxl read DEP_VOXL_RPATH (see build.rs).
@@ -64,6 +64,10 @@ zip = { version = "7", default-features = false, features = [
 nix = { version = "0.31", features = ["fs", "poll", "time"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.14", features = ["remote_desktop", "screencast"] }
+gstreamer = { version = "0.24", features = ["v1_20"] }
+gstreamer-app = { version = "0.24", features = ["v1_20"] }
+gstreamer-video = { version = "0.24", features = ["v1_20"] }
 x11rb = { version = "0.13", features = [
 	"shm",
 	"damage",
